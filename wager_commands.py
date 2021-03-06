@@ -178,7 +178,7 @@ async def check_for_winner(wager):
     reactions = wager_message.reactions
 
     # get a list of users who have used the :wagerwin: reaction
-    win_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == await find_or_create_emoji("wagerwin", wager.guild_id)]
+    win_users_iter = [reaction.users() for reaction in reactions if reaction.custom_emoji and reaction.emoji.id == await find_or_create_emoji("wagerwin", wager.guild_id)]
     if win_users_iter:
         win_users_list = await win_users_iter[0].flatten()
 
@@ -193,7 +193,7 @@ async def check_for_winner(wager):
             winner_id = proposed_winner_ids[0]
 
     # get a list of users who have used the :wagerlose: reaction
-    lose_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == await find_or_create_emoji("wagerlose", wager.guild_id)]
+    lose_users_iter = [reaction.users() for reaction in reactions if reaction.custom_emoji and reaction.emoji.id == await find_or_create_emoji("wagerlose", wager.guild_id)]
     if lose_users_iter:
         lose_users_list = await lose_users_iter[0].flatten()
 
@@ -280,6 +280,8 @@ async def on_ready():
 @bot.event
 async def on_raw_reaction_add(payload):
     emoji = payload.emoji
+    if not emoji.is_custom_emoji: # if this isn't a custom emoji...
+        return
     if emoji.id == await find_or_create_emoji("wagerin", payload.guild_id):
         # find a wager whose create_message has the same ID as the emoji message, AND is not yet accepted
         wager = session.query(Wager).filter(Wager.message_id == payload.message_id, Wager.accepted == False).one_or_none()
@@ -326,7 +328,8 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
 
     # make sure nerds dont try to do negative wagers
     if wager_amount < 1:
-        await ctx.author.send(f"You think that {wager_amount} a real bet?!")
+        await ctx.author.send(f"You think that {wager_amount} is a real bet?!")
+        await ctx.message.add_reaction('\U0001F44E')
         return
 
     # check to see if the creator can afford this wager
