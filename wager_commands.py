@@ -132,6 +132,11 @@ async def accept_wager(wager, user_id):
         await reaction_user.send(f"You can't accept your own wager - your :wagerin: reaction has been removed")
         return
 
+    # make sure nerds dont try anything fishy
+    if wager.amount < 1:
+        await reaction_user.send(f"{wager.amount}?! Thats not a real bet!")
+        return
+
     # make sure we can afford the wager
     if not acceptor.can_afford(wager.amount):
         await reacted_message.remove_reaction(in_emoji, reaction_user) # remove the reaction, since we can't afford
@@ -317,6 +322,11 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
         wager_creator = await find_or_create_user(ctx.author.id)
     except: # error finding user
         await ctx.send(f"{ctx.author.mention}: Sorry, an unknown error occurred when retrieving your user information!")
+        return
+
+    # make sure nerds dont try to do negative wagers
+    if wager_amount < 1:
+        await ctx.author.send(f"You think that {wager_amount} a real bet?!")
         return
 
     # check to see if the creator can afford this wager
