@@ -17,8 +17,7 @@ class Wager(Base):
     id = Column(Integer, primary_key = True)
     guild_id = Column(Integer) # guild is basically the same thing as server
     channel_id = Column(Integer)
-    create_message_id = Column(Integer)
-    accept_message_id = Column(Integer)
+    message_id = Column(Integer)
     creator_id = Column(Integer, ForeignKey("user.id")) # id of user who instantiated the wager
     creator = relationship("User", back_populates="created_wagers", foreign_keys=[creator_id]) # creator object
     amount = Column(Integer)
@@ -80,5 +79,16 @@ class User(Base):
     def can_afford(self, amount):
         outstanding_amount = self.outstanding_money()
         return amount <= self.money - outstanding_amount
+
+class Emoji(Base):
+    __tablename__ = "emoji"
+    id = Column(Integer, primary_key = True, autoincrement = False)
+    guild_id = Column(Integer, nullable=False)
+    name = Column(String, nullable=False)
+
+    def __init__(self, emoji_id, guild_id, name):
+        self.id = emoji_id
+        self.guild_id = guild_id
+        self.name = name
 
 Base.metadata.create_all(engine)

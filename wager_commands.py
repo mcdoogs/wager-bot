@@ -2,9 +2,11 @@ import discord
 import logging
 import os
 import wager_models
+import asyncio
+import schedule
 from dotenv import load_dotenv
 from discord.ext import commands
-from wager_models import Wager, User, session
+from wager_models import Wager, User, Emoji, session
 
 # load our .env file and retrieve token, text, emoji ID's
 load_dotenv()
@@ -12,11 +14,10 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 WAGER_HELP_TEXT = os.getenv("WAGER_HELP_TEXT")
 WAGER_FORMAT_TEXT = os.getenv("WAGER_FORMAT_TEXT")
 WAGER_BRIEF_TEXT = os.getenv("WAGER_BRIEF_TEXT")
+WELCOME_TEXT = os.getenv("WELCOME_TEXT")
+
 STARTING_MONEY = int(os.getenv("STARTING_MONEY"))
-WAGERIN = int(os.getenv("WAGERIN"))
-WAGERWIN = int(os.getenv("WAGERWIN"))
-WAGERLOSE = int(os.getenv("WAGERLOSE"))
-# TODO: create the emojis when joining server? maybe store in DB table
+WEEKLY_MONEY = int(os.getenv("WEEKLY_MONEY"))
 
 # set up logging to output to a file with formatted lines
 logger = logging.getLogger('discord')
@@ -38,23 +39,67 @@ bot_intents = discord.Intents(
 
 bot = commands.Bot(intents=bot_intents, command_prefix='!')
 
-# create a new user in the DB, give them starting money, and send a DM with instructions
-def create_user(user_id):
-    # TODO: how to handle a user in multiple servers?
-    new_user = User(user_id, STARTING_MONEY)
-    session.add(new_user)
+# TODO: randomize phrase for money each time it's mentioned
+
+# add the weekly money allotment to each user's balance
+def distribute_money_recurring():
+    for user in session.query(User).all():
+        user.add_money(WEEKLY_MONEY)
+        session.add(user)
     session.commit()
-    return new_user
-    # TODO: send DM to user with details on how to use
+
+schedule.every().thursday.at("18:20").do(distribute_money_recurring)
+schedule.every().friday.at("18:00").do(distribute_money_recurring)
+
+# check to make sure the reactions in the DB are actually present in the guild
+async def validate_emojis(required_emojis, guild_id):
+    for required_emoji in required_emojis:
+    # check to make sure the wagerin emoji is present
+        emoji = session.query(Emoji).filter(Emoji.name == required_emoji).one_or_none()
+        if not emoji: # if it's not in our database...
+            emoji_id = check_existing_emoji(required_emoji, guild_id) # see if it exists on the server already and get its ID
+            if not emoji_id:
+                emoji_id = await add_emoji(required_emoji, guild_id) # if it's not already in the server, create it
+            emoji = Emoji(emoji_id, guild_id, required_emoji)
+            session.add(emoji, guild_id)
+    session.commit()
+            
+
+# check to see if the emojis are present in the guild, and not just saved in the DB
+def check_existing_emoji(required_emoji, guild_id):
+    guild = bot.get_guild(guild_id)
+    emojis = guild.emojis
+    for emoji in emojis:
+        if emoji.name == required_emoji:
+            return emoji.id
+    return None
+
+# add our custom emojis to the guild
+async def add_emoji(emoji, guild_id):
+    guild = bot.get_guild(guild_id)
+    with open(f"{emoji}.png", "rb") as image:
+        emoji = await guild.create_custom_emoji(name=emoji, image=image.read())
+        return emoji.id
+
+# get an emoji ID by name; creates a new emoji or updates database if not present
+async def find_or_create_emoji(emoji_name, guild_id):
+    emoji = session.query(Emoji).filter(Emoji.name == emoji_name, Emoji.guild_id == guild_id).one_or_none()
+    if not emoji:
+        validate_emojis(emoji_name, guild_id)
+        emoji = session.query(Emoji).filter(Emoji.name == emoji_name, Emoji.guild_id == guild_id).one_or_none()
+    return emoji.id
 
 # find a user in our wager DB using their ID; creates a new user if not found
 async def find_or_create_user(user_id):
+    # TODO: how to handle a user in multiple servers?
     discord_user = bot.get_user(user_id)
     wager_user = session.query(User).filter_by(id=user_id).one_or_none()
     if wager_user is None: # the user doesn't exist yet
         try:
-            wager_user = create_user(user_id) # create the new user
-            await discord_user.send(f"you've been created in the wager system")
+            wager_user = User(user_id, STARTING_MONEY) # create the new user
+            session.add(wager_user)
+            session.commit()
+            await discord_user.send(WELCOME_TEXT)
         except: #error creating user
             await discord_user.send(f"Error creating user {discord_user.mention}!")
             return
@@ -66,13 +111,13 @@ async def accept_wager(wager, user_id):
     wager_channel = bot.get_channel(wager.channel_id)
     reaction_user = bot.get_user(user_id)
     wager_creator_user = bot.get_user(wager.creator_id)
-    reacted_message = await wager_channel.fetch_message(wager.create_message_id)
-    message_url = f"https://discord.com/channels/{reacted_message.guild.id}/{reacted_message.channel.id}/{reacted_message.id}"
+    reacted_message = await wager_channel.fetch_message(wager.message_id)
+    message_url = get_wager_link(wager)
 
     # get the emojis we'll use
-    in_emoji = bot.get_emoji(WAGERIN)
-    win_emoji = bot.get_emoji(WAGERWIN)
-    lose_emoji = bot.get_emoji(WAGERLOSE)
+    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", wager.guild_id))
+    win_emoji = bot.get_emoji(await find_or_create_emoji("wagerwin", wager.guild_id))
+    lose_emoji = bot.get_emoji(await find_or_create_emoji("wagerlose", wager.guild_id))
 
     try:
         # get/create the user accepting the wager from the DB
@@ -107,19 +152,19 @@ async def accept_wager(wager, user_id):
     await reaction_user.send(f"You've accepted a wager from {wager_creator_user.display_name} for {wager.amount}.\nCondition: {wager.description}\n{message_url}")
     await wager_creator_user.send(f"{reaction_user.display_name} accepted your wager!\n{message_url}")
 
-# check the wager's message for completion - i.e. there is exactly one win emoji from the wager's creator/taker, and exactly one lose emoji from the other
+# check the wager's message for completion - i.e. there is exactly one win emoji from the wager's creator/taker, and exactly one lose emoji from the other. returns winner_id if valid
 async def check_for_winner(wager):
     # initialize our winner/lose id's
     winner_id = None
     loser_id = None
 
     # get the emojis we'll use
-    win_emoji = bot.get_emoji(WAGERWIN)
-    lose_emoji = bot.get_emoji(WAGERLOSE)
+    win_emoji = bot.get_emoji(await find_or_create_emoji("wagerwin", wager.guild_id))
+    lose_emoji = bot.get_emoji(await find_or_create_emoji("wagerlose", wager.guild_id))
 
     # get a discord object for the channel/message of the wager
     wager_channel = bot.get_channel(wager.channel_id)
-    wager_message = await wager_channel.fetch_message(wager.create_message_id)
+    wager_message = await wager_channel.fetch_message(wager.message_id)
 
     # make a list of the users involved in the wager
     wager_user_ids = [wager.creator_id, wager.taker_id]
@@ -128,7 +173,7 @@ async def check_for_winner(wager):
     reactions = wager_message.reactions
 
     # get a list of users who have used the :wagerwin: reaction
-    win_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == WAGERWIN]
+    win_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == await find_or_create_emoji("wagerwin", wager.guild_id)]
     if win_users_iter:
         win_users_list = await win_users_iter[0].flatten()
 
@@ -143,7 +188,7 @@ async def check_for_winner(wager):
             winner_id = proposed_winner_ids[0]
 
     # get a list of users who have used the :wagerlose: reaction
-    lose_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == WAGERLOSE]
+    lose_users_iter = [reaction.users() for reaction in reactions if reaction.emoji.id == await find_or_create_emoji("wagerlose", wager.guild_id)]
     if lose_users_iter:
         lose_users_list = await lose_users_iter[0].flatten()
 
@@ -164,17 +209,19 @@ async def check_for_winner(wager):
             return
         # bet is complete!
         return winner_id
-    
+
+# handle winning a bet (messaging, money transfer, DB update)
 async def resolve_winner(wager, winner_id):
     # edit the original message
     # get a discord object for the channel/message/users of the wager
     wager_channel = bot.get_channel(wager.channel_id)
-    wager_message = await wager_channel.fetch_message(wager.create_message_id)
+    wager_message = await wager_channel.fetch_message(wager.message_id)
     wager_creator_user = bot.get_user(wager.creator_id)
     wager_taker_user = bot.get_user(wager.taker_id)
     wager_winner_user = bot.get_user(winner_id)
     message_url = f"https://discord.com/channels/{wager_message.guild.id}/{wager_message.channel.id}/{wager_message.id}"
 
+    # set the winner and loser based off the winner ID we got passed
     if wager.creator_id == winner_id:
         wager_loser_user =  wager_taker_user
         loser_id = wager.taker_id
@@ -182,6 +229,7 @@ async def resolve_winner(wager, winner_id):
         wager_loser_user = wager_creator_user
         loser_id = wager.creator_id
 
+    # edit the original message to reflect winner
     await wager_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{wager_winner_user.display_name} won the wager against {wager_loser_user.display_name}!")
 
     # send a DM to the participants
@@ -197,6 +245,10 @@ async def resolve_winner(wager, winner_id):
     session.add(wager)
     session.commit()
 
+# generate a direct link to a wager message
+def get_wager_link(wager):
+    return f"https://discord.com/channels/{wager.guild_id}/{wager.channel_id}/{wager.message_id}"
+
 # Display some debug stuff when logged in, and set status
 @bot.event
 async def on_ready():
@@ -204,26 +256,37 @@ async def on_ready():
     print(bot.user.name)
     print(bot.user.id)
     print('------')
+
+    # change bot's presence info
     await bot.change_presence(activity=discord.Game(name='with !wagers'))
+
+    # check for emojis
+    guilds = bot.guilds
+    for guild in guilds:
+        await validate_emojis(["wagerin", "wagerwin", "wagerlose"], guild.id)
+
+    # run schedule and check for jobs every second
+    while True:
+        # run_pending
+        schedule.run_pending()
+        await asyncio.sleep(1)
 
 # Watch for reactions that match our custom emoji
 @bot.event
 async def on_raw_reaction_add(payload):
     emoji = payload.emoji
-    if emoji.id == WAGERIN:
+    if emoji.id == await find_or_create_emoji("wagerin", payload.guild_id):
         # find a wager whose create_message has the same ID as the emoji message, AND is not yet accepted
-        wager = session.query(Wager).filter(Wager.create_message_id == payload.message_id, Wager.accepted == False).one_or_none()
+        wager = session.query(Wager).filter(Wager.message_id == payload.message_id, Wager.accepted == False).one_or_none()
         if wager is not None:
             await accept_wager(wager, payload.user_id)
-    if emoji.id == WAGERWIN or emoji.id == WAGERLOSE:
+    if emoji.id == await find_or_create_emoji("wagerwin", payload.guild_id) or emoji.id == await find_or_create_emoji("wagerlose", payload.guild_id):
         # find a wager whose create_message has the same ID as the emoji message, AND is accepted but not yet completed
-        wager = session.query(Wager).filter(Wager.create_message_id == payload.message_id, Wager.accepted == True, Wager.completed == False).one_or_none()
+        wager = session.query(Wager).filter(Wager.message_id == payload.message_id, Wager.accepted == True, Wager.completed == False).one_or_none()
         if wager is not None:
             winner_id = await check_for_winner(wager) # check to see if this reaction confirms a winner for the wager
             if winner_id: # if we have a winner, complete the wager!
                 await resolve_winner(wager, winner_id)
-
-# TODO: create a DM with the bot and the two users?
 
 # !start command to create a new user and give them starting money
 @bot.command(
@@ -233,7 +296,7 @@ async def on_raw_reaction_add(payload):
     brief = "Get set up for !wagers commands"
 )
 async def start(ctx):
-    create_user(ctx.author.id)
+    await find_or_create_user(ctx.author.id)
 
 # !wager / !bet command to create a new wager
 @bot.command(
@@ -273,11 +336,11 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
     new_wager = Wager(ctx.guild.id, ctx.channel.id, wager_creator.id, wager_amount, wager_text)
     
     # send confirmation message
-    in_emoji = bot.get_emoji(WAGERIN) # get the emoji we want to display in the message
+    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", ctx.guild.id)) # get the emoji we want to display in the message
     create_message = await ctx.send(f"{ctx.author.display_name} wagered {new_wager.amount} - condition: **{new_wager.description}**.\nReact to **this** message with `:wagerin:` ({str(in_emoji)}) to accept the wager!") 
     
     # store the id of the message we sent so we can check for reactions on it later
-    new_wager.create_message_id = create_message.id
+    new_wager.message_id = create_message.id
 
     # persist our wager
     session.add(new_wager)
@@ -296,10 +359,113 @@ async def wager_handler(ctx, error):
     name="list_wagers",
     aliases=["wagers", "list"],
     brief="List existing wagers",
-    help="At this point, the command just outputs some info about existing wagers."
+    help="Outputs a list of your created and accepted wagers, along with their status and direct links."
 )
 async def list_wagers(ctx):
-    pass # TODO - actually return the wagers
+    separator = '\n-----------------------------------------------------------------------------'
+    user = await find_or_create_user(ctx.author.id)
+    created_wagers = user.created_wagers
+    accepted_wagers = user.accepted_wagers
+    content = "__**Your wagers:**__" + separator
+    if not created_wagers and not accepted_wagers:
+        content += "\n__You haven't participated in any wagers yet!__ Type `!help wager` to get started."
+    if created_wagers:
+        content += "\n__Your created wagers:__" + separator
+        for wager in created_wagers:
+            # Get name of user who accepted, if anyone
+            if wager.taker:
+                taker_name = bot.get_user(wager.taker.id).display_name
+            else:
+                taker_name = "Nobody"
+            
+            # Get status
+            if wager.completed:
+                status = "Complete"
+                if wager.winner_id == ctx.author.id:
+                    winner_name = "You"
+                else:
+                    winner_name = taker_name
+                winner_text = f"**Winner:** {winner_name}"
+            elif wager.accepted:
+                status = "Accepted"
+                winner_text = ""
+            else:
+                status = "Created"
+                winner_text = ""
 
+            # build the message content for this wager
+            content += f"\n**Amount:** {wager.amount} **Accepted by:** {taker_name} **Status:** {status} {winner_text}"
+            content += f"\n**Description:** {wager.description}"
+            content += f"\n**Link:** {get_wager_link(wager)}"
+            content += separator
+    
+    if accepted_wagers:
+        content += "\n__Your accepted wagers:__" + separator
+        for wager in accepted_wagers:
+            # Get creator name
+            creator_name = bot.get_user(wager.creator_id).display_name
+            # Get status
+            if wager.completed:
+                status = "Complete"
+                if wager.winner_id == ctx.author.id:
+                    winner_name = "You"
+                else:
+                    winner_name = creator_name
+                winner_text = f"**Winner:** {winner_name}"
+            else:
+                status = "Accepted"
+                winner_text = ""
+
+            # build the message content for this wager
+            content += f"\n**Amount:** {wager.amount} **Created by:** {creator_name} **Status:** {status} {winner_text}"
+            content += f"\n**Description:** {wager.description}"
+            content += f"\n**Link:** {get_wager_link(wager)}"
+            content += separator
+    
+    await ctx.author.send(content)
+            
+
+@bot.command(
+    name="money",
+    brief="Show information about your imaginary money",
+    help="Lists your total money, as well as what money you have currently tied up in bets."
+)
+async def money(ctx):
+    user = await find_or_create_user(ctx.author.id)
+    await ctx.author.send(f"You have {user.money} doubloons, {user.outstanding_money()} of which are tied up in outstanding bets. This leaves you {user.money - user.outstanding_money()} available.")
+
+# TODO: maybe remove the bet 'taker' from DB if they remove the 'in' emoji?
+
+@bot.command(
+    name="cancel",
+    brief="Cancel one of your oustanding bets",
+    help="Without any arguments, this command will list your outstanding bets and a unique ID for each - to cancel a bet, use that ID in the cancel command e.g. '!cancel 13'. You can cancel multiple bets by separating the IDs with spaces."
+)
+async def cancel(ctx, *cancel_ids: int):
+    user = await find_or_create_user(ctx.author.id)
+    if not cancel_ids:
+        separator = '\n-----------------------------------------------------------------------------'
+        wagers = [created_wager for created_wager in user.created_wagers if created_wager.completed == False]
+        content = "__**Your Outstanding Wagers**__  (Cancel with !cancel `id`)" + separator
+        for wager in wagers:
+            content += f"\n**ID:** {wager.id} **Amount:** {wager.amount}\n**Description:** {wager.description}\n**Link:** {get_wager_link(wager)}" + separator
+        await bot.get_user(user.id).send(content)
+    else:
+        for cancel_id in cancel_ids:
+            wager = session.query(Wager).filter(Wager.id == cancel_id, Wager.completed == False, Wager.creator_id == ctx.author.id).one_or_none()
+            if wager is None:
+                await bot.get_user(user.id).send(f"No outstanding wager with an ID of {cancel_id} found")
+            else:
+                # get a discord object for the channel/message of the wager
+                wager_channel = bot.get_channel(wager.channel_id)
+                wager_message = await wager_channel.fetch_message(wager.message_id)
+                # cross that message out
+                new_content = f"~~{wager_message.content}~~"
+                await wager_message.edit(content=new_content)
+                # delete from DB
+                session.delete(wager)
+                await bot.get_user(user.id).send(f"Canceled bet with ID {cancel_id}")
+        session.commit()
+            
 
 bot.run(DISCORD_TOKEN)
