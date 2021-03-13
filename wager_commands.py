@@ -164,7 +164,7 @@ async def accept_wager(wager, user_id):
     wager.accept(acceptor.id)
 
     # edit the wager creation message with new text on how to win/lose the wager
-    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner reply to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser reply with `:wagerlose:` ({str(lose_emoji)})")
+    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner react to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser react with `:wagerlose:` ({str(lose_emoji)})")
 
     # pre-populate the emoji's that users can respond with
     await reacted_message.add_reaction(win_emoji)
