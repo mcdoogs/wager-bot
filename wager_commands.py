@@ -122,6 +122,8 @@ async def accept_wager(wager, user_id):
     # get the discord objects for the channel, user, and message; generate a link to the message
     wager_channel = bot.get_channel(wager.channel_id)
     reaction_user = bot.get_user(user_id)
+    if reaction_user.bot: # we're a bot; ignore
+        return
     wager_creator_user = bot.get_user(wager.creator_id)
     reacted_message = await wager_channel.fetch_message(wager.message_id)
     message_url = get_wager_link(wager)
@@ -164,6 +166,10 @@ async def accept_wager(wager, user_id):
 
     # edit the wager creation message with new text on how to win/lose the wager
     await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner reply to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser reply with `:wagerlose:` ({str(lose_emoji)})")
+
+    # pre-populate the emoji's that users can respond with
+    await reacted_message.add_reaction(win_emoji)
+    await reacted_message.add_reaction(lose_emoji)
 
     # send DM's to creator and acceptor
     await reaction_user.send(f"You've accepted a wager from {wager_creator_user.display_name} for {wager.amount}.\nCondition: {wager.description}\n{message_url}")
@@ -325,6 +331,7 @@ async def start(ctx):
     brief = WAGER_BRIEF_TEXT
 )
 async def create_wager(ctx, wager_amount: int, *, wager_text: str):
+    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", ctx.guild.id)) # get the emoji we want to add / display in message
     # check to see if wager was created in a DM
     if ctx.channel.type is discord.ChannelType.private:
         await ctx.send("Can't create a wager in a direct message, sorry")
@@ -361,9 +368,11 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
     new_wager = Wager(ctx.guild.id, ctx.channel.id, wager_creator.id, wager_amount, wager_text)
     
     # send confirmation message
-    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", ctx.guild.id)) # get the emoji we want to display in the message
     create_message = await ctx.send(f"{ctx.author.display_name} wagered {new_wager.amount} - condition: **{new_wager.description}**.\nReact to **this** message with `:wagerin:` ({str(in_emoji)}) to accept the wager!") 
     
+    # pre-fill the 'in' emoji on the wager message
+    await create_message.add_reaction(in_emoji)
+
     # store the id of the message we sent so we can check for reactions on it later
     new_wager.message_id = create_message.id
 
