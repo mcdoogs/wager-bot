@@ -49,7 +49,6 @@ def distribute_money_recurring():
         session.add(user)
     session.commit()
 
-schedule.every().thursday.at("18:20").do(distribute_money_recurring)
 schedule.every().friday.at("18:00").do(distribute_money_recurring)
 
 # check to make sure the reactions are present in the DB *and* those ID's are present in the guild; add if necessary
