@@ -15,6 +15,7 @@ WAGER_HELP_TEXT = os.getenv("WAGER_HELP_TEXT")
 WAGER_FORMAT_TEXT = os.getenv("WAGER_FORMAT_TEXT")
 WAGER_BRIEF_TEXT = os.getenv("WAGER_BRIEF_TEXT")
 WELCOME_TEXT = os.getenv("WELCOME_TEXT")
+APP_ENV = os.getenv("APP_ENV")
 
 STARTING_MONEY = int(os.getenv("STARTING_MONEY"))
 WEEKLY_MONEY = int(os.getenv("WEEKLY_MONEY"))
@@ -51,17 +52,24 @@ def distribute_money_recurring():
 schedule.every().thursday.at("18:20").do(distribute_money_recurring)
 schedule.every().friday.at("18:00").do(distribute_money_recurring)
 
-# check to make sure the reactions in the DB are actually present in the guild
+# check to make sure the reactions are present in the DB *and* those ID's are present in the guild; add if necessary
 async def validate_emojis(required_emojis, guild_id):
     for required_emoji in required_emojis:
-    # check to make sure the wagerin emoji is present
+        # find this emoji in the DB
         emoji = session.query(Emoji).filter(Emoji.name == required_emoji).one_or_none()
-        if not emoji: # if it's not in our database...
+        if not emoji: # if it's not in our database, look for it in list of emojis and add to DB, or create a new one
             emoji_id = check_existing_emoji(required_emoji, guild_id) # see if it exists on the server already and get its ID
             if not emoji_id:
                 emoji_id = await add_emoji(required_emoji, guild_id) # if it's not already in the server, create it
             emoji = Emoji(emoji_id, guild_id, required_emoji)
             session.add(emoji, guild_id)
+        else: # if it is in our database, check to make sure it actually exists in the guild
+            emoji_id = check_existing_emoji(required_emoji, guild_id)
+            if not emoji_id: # if the emoji indicated in the DB is not actually in the guild...
+                session.delete(emoji) # remove the incorrect entry in the DB
+                emoji_id = await add_emoji(required_emoji, guild_id) # create a new one
+                emoji = Emoji(emoji_id, guild_id, required_emoji)
+                session.add(emoji, guild_id)
     session.commit()
             
 
@@ -74,10 +82,14 @@ def check_existing_emoji(required_emoji, guild_id):
             return emoji.id
     return None
 
-# add our custom emojis to the guild
+# add our custom emojis to the guild (use dev emoji if dev environment)
 async def add_emoji(emoji, guild_id):
+    if APP_ENV == "dev":
+        path = "dev_emoji/"
+    else:
+        path = ""
     guild = bot.get_guild(guild_id)
-    with open(f"{emoji}.png", "rb") as image:
+    with open(f"{path}{emoji}.png", "rb") as image:
         emoji = await guild.create_custom_emoji(name=emoji, image=image.read())
         return emoji.id
 
