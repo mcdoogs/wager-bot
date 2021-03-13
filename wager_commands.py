@@ -15,6 +15,7 @@ WAGER_HELP_TEXT = os.getenv("WAGER_HELP_TEXT")
 WAGER_FORMAT_TEXT = os.getenv("WAGER_FORMAT_TEXT")
 WAGER_BRIEF_TEXT = os.getenv("WAGER_BRIEF_TEXT")
 WELCOME_TEXT = os.getenv("WELCOME_TEXT")
+APP_ENV = os.getenv("APP_ENV")
 
 STARTING_MONEY = int(os.getenv("STARTING_MONEY"))
 WEEKLY_MONEY = int(os.getenv("WEEKLY_MONEY"))
@@ -48,20 +49,26 @@ def distribute_money_recurring():
         session.add(user)
     session.commit()
 
-schedule.every().thursday.at("18:20").do(distribute_money_recurring)
 schedule.every().friday.at("18:00").do(distribute_money_recurring)
 
-# check to make sure the reactions in the DB are actually present in the guild
+# check to make sure the reactions are present in the DB *and* those ID's are present in the guild; add if necessary
 async def validate_emojis(required_emojis, guild_id):
     for required_emoji in required_emojis:
-    # check to make sure the wagerin emoji is present
+        # find this emoji in the DB
         emoji = session.query(Emoji).filter(Emoji.name == required_emoji).one_or_none()
-        if not emoji: # if it's not in our database...
+        if not emoji: # if it's not in our database, look for it in list of emojis and add to DB, or create a new one
             emoji_id = check_existing_emoji(required_emoji, guild_id) # see if it exists on the server already and get its ID
             if not emoji_id:
                 emoji_id = await add_emoji(required_emoji, guild_id) # if it's not already in the server, create it
             emoji = Emoji(emoji_id, guild_id, required_emoji)
             session.add(emoji, guild_id)
+        else: # if it is in our database, check to make sure it actually exists in the guild
+            emoji_id = check_existing_emoji(required_emoji, guild_id)
+            if not emoji_id: # if the emoji indicated in the DB is not actually in the guild...
+                session.delete(emoji) # remove the incorrect entry in the DB
+                emoji_id = await add_emoji(required_emoji, guild_id) # create a new one
+                emoji = Emoji(emoji_id, guild_id, required_emoji)
+                session.add(emoji, guild_id)
     session.commit()
             
 
@@ -74,10 +81,14 @@ def check_existing_emoji(required_emoji, guild_id):
             return emoji.id
     return None
 
-# add our custom emojis to the guild
+# add our custom emojis to the guild (use dev emoji if dev environment)
 async def add_emoji(emoji, guild_id):
+    if APP_ENV == "dev":
+        path = "dev_emoji/"
+    else:
+        path = ""
     guild = bot.get_guild(guild_id)
-    with open(f"{emoji}.png", "rb") as image:
+    with open(f"{path}{emoji}.png", "rb") as image:
         emoji = await guild.create_custom_emoji(name=emoji, image=image.read())
         return emoji.id
 
@@ -110,6 +121,8 @@ async def accept_wager(wager, user_id):
     # get the discord objects for the channel, user, and message; generate a link to the message
     wager_channel = bot.get_channel(wager.channel_id)
     reaction_user = bot.get_user(user_id)
+    if reaction_user.bot: # we're a bot; ignore
+        return
     wager_creator_user = bot.get_user(wager.creator_id)
     reacted_message = await wager_channel.fetch_message(wager.message_id)
     message_url = get_wager_link(wager)
@@ -151,7 +164,11 @@ async def accept_wager(wager, user_id):
     wager.accept(acceptor.id)
 
     # edit the wager creation message with new text on how to win/lose the wager
-    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner reply to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser reply with `:wagerlose:` ({str(lose_emoji)})")
+    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner react to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser react with `:wagerlose:` ({str(lose_emoji)})")
+
+    # pre-populate the emoji's that users can respond with
+    await reacted_message.add_reaction(win_emoji)
+    await reacted_message.add_reaction(lose_emoji)
 
     # send DM's to creator and acceptor
     await reaction_user.send(f"You've accepted a wager from {wager_creator_user.display_name} for {wager.amount}.\nCondition: {wager.description}\n{message_url}")
@@ -313,6 +330,7 @@ async def start(ctx):
     brief = WAGER_BRIEF_TEXT
 )
 async def create_wager(ctx, wager_amount: int, *, wager_text: str):
+    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", ctx.guild.id)) # get the emoji we want to add / display in message
     # check to see if wager was created in a DM
     if ctx.channel.type is discord.ChannelType.private:
         await ctx.send("Can't create a wager in a direct message, sorry")
@@ -349,9 +367,11 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
     new_wager = Wager(ctx.guild.id, ctx.channel.id, wager_creator.id, wager_amount, wager_text)
     
     # send confirmation message
-    in_emoji = bot.get_emoji(await find_or_create_emoji("wagerin", ctx.guild.id)) # get the emoji we want to display in the message
     create_message = await ctx.send(f"{ctx.author.display_name} wagered {new_wager.amount} - condition: **{new_wager.description}**.\nReact to **this** message with `:wagerin:` ({str(in_emoji)}) to accept the wager!") 
     
+    # pre-fill the 'in' emoji on the wager message
+    await create_message.add_reaction(in_emoji)
+
     # store the id of the message we sent so we can check for reactions on it later
     new_wager.message_id = create_message.id
 
@@ -363,6 +383,8 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
 @create_wager.error
 async def wager_handler(ctx, error):
     if isinstance(error, commands.BadArgument):
+        await ctx.send(WAGER_FORMAT_TEXT)
+    elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(WAGER_FORMAT_TEXT)
     else:
         await ctx.send("Unknown error creating wager")

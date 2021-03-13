@@ -9,3 +9,5 @@ Create a new .env file by copying the .env.example file:
 cp .env.example .env
 ```
 Enter your discord bot's token.
+
+Set the APP_ENV variable to either 'dev' or 'prod' to define the environment. Right now this only affects which emoji are loaded, but in the future could determine logging levels, etc
