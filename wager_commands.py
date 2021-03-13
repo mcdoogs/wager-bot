@@ -384,6 +384,8 @@ async def create_wager(ctx, wager_amount: int, *, wager_text: str):
 async def wager_handler(ctx, error):
     if isinstance(error, commands.BadArgument):
         await ctx.send(WAGER_FORMAT_TEXT)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(WAGER_FORMAT_TEXT)
     else:
         await ctx.send("Unknown error creating wager")
 
