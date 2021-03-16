@@ -64,15 +64,19 @@ async def validate_emojis(required_emojis, guild_id):
             session.add(emoji, guild_id)
         else: # if it is in our database, check to make sure it actually exists in the guild
             emoji_id = check_existing_emoji(required_emoji, guild_id)
-            if not emoji_id: # if the emoji indicated in the DB is not actually in the guild...
+            if not emoji_id: # if the emoji doesn't exist on the server, create a new one
                 session.delete(emoji) # remove the incorrect entry in the DB
                 emoji_id = await add_emoji(required_emoji, guild_id) # create a new one
                 emoji = Emoji(emoji_id, guild_id, required_emoji)
                 session.add(emoji, guild_id)
+            elif not emoji_id == emoji.id: # if the emoji in the DB doesn't have the same ID as the emoji on the server, update the DB with server info
+                session.delete(emoji) # remove the incorrect entry in the DB
+                emoji = Emoji(emoji_id, guild_id, required_emoji) # add the existing emoji to the DB
+                session.add(emoji, guild_id)
     session.commit()
             
 
-# check to see if the emojis are present in the guild, and not just saved in the DB
+# check the indicated guild for a required emoji; if found, return its ID
 def check_existing_emoji(required_emoji, guild_id):
     guild = bot.get_guild(guild_id)
     emojis = guild.emojis
@@ -404,6 +408,7 @@ async def list_wagers(ctx):
     content = "__**Your wagers:**__" + separator
     if not created_wagers and not accepted_wagers:
         content += "\n__You haven't participated in any wagers yet!__ Type `!help wager` to get started."
+        await ctx.author.send(content)
     if created_wagers:
         content += "\n__Your created wagers:__" + separator
         for wager in created_wagers:
@@ -433,6 +438,8 @@ async def list_wagers(ctx):
             content += f"\n**Description:** {wager.description}"
             content += f"\n**Link:** {get_wager_link(wager)}"
             content += separator
+            await ctx.author.send(content)
+            content = ""
     
     if accepted_wagers:
         content += "\n__Your accepted wagers:__" + separator
@@ -456,8 +463,8 @@ async def list_wagers(ctx):
             content += f"\n**Description:** {wager.description}"
             content += f"\n**Link:** {get_wager_link(wager)}"
             content += separator
-    
-    await ctx.author.send(content)
+            await ctx.author.send(content)
+            content = ""
             
 
 @bot.command(
