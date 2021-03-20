@@ -124,8 +124,8 @@ async def find_or_create_user(user_id):
 async def accept_wager(wager, user_id):
     # get the discord objects for the channel, user, and message; generate a link to the message
     wager_channel = bot.get_channel(wager.channel_id)
-    reaction_user = bot.get_user(user_id)
-    if reaction_user.bot: # we're a bot; ignore
+    accepting_user = bot.get_user(user_id)
+    if accepting_user.bot: # we're a bot; ignore
         return
     wager_creator_user = bot.get_user(wager.creator_id)
     reacted_message = await wager_channel.fetch_message(wager.message_id)
@@ -140,43 +140,62 @@ async def accept_wager(wager, user_id):
         # get/create the user accepting the wager from the DB
         acceptor = await find_or_create_user(user_id)
     except: # error finding user
-        await wager_channel.send(f"{reaction_user.mention}: Sorry, an unknown error occurred when retrieving your user information!")
+        await wager_channel.send(f"{accepting_user.mention}: Sorry, an unknown error occurred when retrieving your user information!")
         return
     
     # can't accept your own wager
     if wager.creator_id == user_id:
-        await reacted_message.remove_reaction(in_emoji, reaction_user) # remove the offending reaction
-        await reaction_user.send(f"You can't accept your own wager - your :wagerin: reaction has been removed")
+        await reacted_message.remove_reaction(in_emoji, accepting_user) # remove the offending reaction
+        await accepting_user.send(f"You can't accept your own wager - your :wagerin: reaction has been removed")
         return
 
     # make sure nerds dont try anything fishy
     if wager.amount < 1:
-        await reaction_user.send(f"{wager.amount}?! Thats not a real bet!")
+        await accepting_user.send(f"{wager.amount}?! Thats not a real bet!")
         return
 
     # make sure we can afford the wager
     if not acceptor.can_afford(wager.amount):
-        await reacted_message.remove_reaction(in_emoji, reaction_user) # remove the reaction, since we can't afford
+        await reacted_message.remove_reaction(in_emoji, accepting_user) # remove the reaction, since we can't afford
         # get our money totals to send to the user in DM
         total_money = acceptor.money
         outstanding_money = acceptor.outstanding_money()
         available_money = total_money - outstanding_money
-        await reaction_user.send(f"You don't have enough moolah to take that wager! \U0001F4B8\n**Description:** {wager.description}\n**Amount:** {wager.amount}\nYou've got {total_money} doubloons and {outstanding_money} are in outstanding bets, leaving {available_money} doubloons available!")
+        await accepting_user.send(f"You don't have enough moolah to take that wager! \U0001F4B8\n**Description:** {wager.description}\n**Amount:** {wager.amount}\nYou've got {total_money} doubloons and {outstanding_money} are in outstanding bets, leaving {available_money} doubloons available!")
         return
 
     # update the DB with the info on taker
     wager.accept(acceptor.id)
 
     # edit the wager creation message with new text on how to win/lose the wager
-    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{reaction_user.display_name} accepted - winner react to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser react with `:wagerlose:` ({str(lose_emoji)})")
+    await reacted_message.edit(content=f"{wager_creator_user.display_name} wagered {wager.amount} - condition: **{wager.description}**.\n{accepting_user.display_name} accepted - winner react to **this** message with `:wagerwin:` ({str(win_emoji)}) and loser react with `:wagerlose:` ({str(lose_emoji)})")
 
     # pre-populate the emoji's that users can respond with
     await reacted_message.add_reaction(win_emoji)
     await reacted_message.add_reaction(lose_emoji)
 
     # send DM's to creator and acceptor
-    await reaction_user.send(f"You've accepted a wager from {wager_creator_user.display_name} for {wager.amount}.\nCondition: {wager.description}\n{message_url}")
-    await wager_creator_user.send(f"{reaction_user.display_name} accepted your wager!\n{message_url}")
+    await accepting_user.send(f"You've accepted a wager from {wager_creator_user.display_name} for {wager.amount}.\nCondition: {wager.description}\n{message_url}")
+    await wager_creator_user.send(f"{accepting_user.display_name} accepted your wager!\n{message_url}")
+
+async def cancel_wager(wager_id, user_id):
+    wager = session.query(Wager).filter(Wager.id == wager_id, Wager.completed == False, Wager.creator_id == user_id).one_or_none()
+    user = bot.get_user(user_id)
+    if wager is None and user:
+        await user.send(f"No outstanding wager with an ID of {wager_id} found")
+    else:
+        # get a discord object for the channel/message/guild of the wager
+        wager_guild = bot.get_guild(wager.guild_id)
+        wager_channel = bot.get_channel(wager.channel_id)
+        wager_message = await wager_channel.fetch_message(wager.message_id)
+        # cross that message out
+        new_content = f"~~{wager_message.content}~~"
+        await wager_message.edit(content=new_content)
+        # delete from DB
+        session.delete(wager)
+        if user and wager_guild.get_member(user_id): # check to make sure they're still a member before messaging
+            await user.send(f"Canceled bet with ID {wager_id}")
+        session.commit()
 
 # check the wager's message for completion - i.e. there is exactly one win emoji from the wager's creator/taker, and exactly one lose emoji from the other. returns winner_id if valid
 async def check_for_winner(wager):
@@ -316,6 +335,19 @@ async def on_raw_reaction_add(payload):
             if winner_id: # if we have a winner, complete the wager!
                 await resolve_winner(wager, winner_id)
 
+# Watch for users leaving; delete any outstanding wagers when they do
+@bot.event
+async def on_member_remove(member):
+    # get all outstanding wagers
+    outstanding_wagers = session.query(Wager).filter(Wager.completed == False).all()
+    for wager in outstanding_wagers:
+        # cancel the wager if the leaving user created it
+        if wager.creator_id == member.id:
+            await cancel_wager(wager.id, member.id)
+        # cancel the wager if the leaving user accepted it
+        elif wager.taker_id == member.id:
+            await cancel_wager(wager.id, wager.creator_id) # TODO: don't pass ID of user to cancel function, this should be checked before calling
+
 # !start command to create a new user and give them starting money
 @bot.command(
     name="start",
@@ -414,7 +446,11 @@ async def list_wagers(ctx):
         for wager in created_wagers:
             # Get name of user who accepted, if anyone
             if wager.taker:
-                taker_name = bot.get_user(wager.taker.id).display_name
+                taker_user = bot.get_user(wager.taker.id)
+                if taker_user:
+                    taker_name = taker_user.display_name
+                else:
+                    taker_name = "Deleted User"
             else:
                 taker_name = "Nobody"
             
@@ -445,7 +481,11 @@ async def list_wagers(ctx):
         content += "\n__Your accepted wagers:__" + separator
         for wager in accepted_wagers:
             # Get creator name
-            creator_name = bot.get_user(wager.creator_id).display_name
+            creator_user = bot.get_user(wager.creator_id)
+            if creator_user:
+                creator_name = creator_user.display_name
+            else:
+                creator_name = "Deleted user"
             # Get status
             if wager.completed:
                 status = "Complete"
@@ -494,20 +534,7 @@ async def cancel(ctx, *cancel_ids: int):
         await bot.get_user(user.id).send(content)
     else:
         for cancel_id in cancel_ids:
-            wager = session.query(Wager).filter(Wager.id == cancel_id, Wager.completed == False, Wager.creator_id == ctx.author.id).one_or_none()
-            if wager is None:
-                await bot.get_user(user.id).send(f"No outstanding wager with an ID of {cancel_id} found")
-            else:
-                # get a discord object for the channel/message of the wager
-                wager_channel = bot.get_channel(wager.channel_id)
-                wager_message = await wager_channel.fetch_message(wager.message_id)
-                # cross that message out
-                new_content = f"~~{wager_message.content}~~"
-                await wager_message.edit(content=new_content)
-                # delete from DB
-                session.delete(wager)
-                await bot.get_user(user.id).send(f"Canceled bet with ID {cancel_id}")
-        session.commit()
+            await cancel_wager(cancel_id, user.id)
             
 
 bot.run(DISCORD_TOKEN)
